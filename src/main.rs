@@ -1,3 +1,4 @@
+use api_client::err_to_string;
 use cursive::{
     self,
     theme::{BaseColor, Color, PaletteColor, PaletteStyle, Theme},
@@ -10,8 +11,7 @@ use cursive::{
 };
 use dotenv::dotenv;
 use reqwest::{self, Method};
-use std::env;
-use std::{io::Write, panic};
+use std::{env, io::Write, panic};
 
 fn main() {
     dotenv().ok();
@@ -36,7 +36,7 @@ fn main() {
             .item("POST", Method::POST)
             .item("DELETE", Method::DELETE)
             .item("PATCH", Method::PATCH)
-            .on_submit(move |s, method| on_request_submit(s, method, client.clone()))
+            .on_submit(move |s, method| on_request_submit(s, method, &client))
             .h_align(cursive::align::HAlign::Center)
             .fixed_width(10)
             .with_name("method"),
@@ -64,8 +64,8 @@ fn main() {
     let request_label = TextView::new("Request body:");
     let request_body = ThemedView::new(custom_theme, TextArea::new().with_name("request"));
 
-    let response_label = TextView::new("Response:");
-    let response_body = TextView::new("...").with_name("response");
+    let response_label = TextView::new("Response:").with_name("response_label");
+    let response_body = TextView::new("").with_name("response");
 
     let request = Panel::new(
         LinearLayout::vertical()
@@ -97,7 +97,7 @@ fn main() {
     siv.run();
 }
 
-fn on_request_submit(s: &mut Cursive, method: &Method, client: reqwest::blocking::Client) {
+fn on_request_submit(s: &mut Cursive, method: &Method, client: &reqwest::blocking::Client) {
     let url = s
         .find_name::<ResizedView<EditView>>("url")
         .unwrap()
@@ -108,37 +108,37 @@ fn on_request_submit(s: &mut Cursive, method: &Method, client: reqwest::blocking
     let request_body = s.find_name::<TextArea>("request").unwrap();
     let request_body = request_body.get_content().to_owned();
 
-    let content = match *method {
+    let response = match *method {
         Method::GET => Ok(client.get(url)),
         Method::POST => Ok(client.post(url).body(request_body)),
         Method::DELETE => Ok(client.delete(url)),
         Method::PATCH => Ok(client.patch(url)),
         _ => Err("Invalid method".to_string()),
     }
-    .and_then(|builder| builder.send().map_err(|err| err.to_string()))
-    .map(|response| (method, response));
+    .and_then(|builder| err_to_string!(builder.send()));
 
-    let content = content
-        .map(format_response)
-        .unwrap_or_else(|err| format!("ERROR: {err}"));
+    let (label_content, body_content) = match response {
+        Ok(success) => {
+            let status = success.status();
+            let label = format!(
+                "Response: {} {} for {}",
+                status.as_str(),
+                status.canonical_reason().unwrap_or(""),
+                method.as_str()
+            );
+
+            let body = success.text().unwrap_or("".to_string());
+
+            (label, body)
+        }
+        Err(err) => ("".to_string(), format!("ERROR: {err}")),
+    };
+
+    s.call_on_name("response_label", |view: &mut TextView| {
+        view.set_content(label_content);
+    });
 
     s.call_on_name("response", |view: &mut TextView| {
-        view.set_content(content);
+        view.set_content(body_content);
     });
-}
-
-fn format_response((method, response): (&Method, reqwest::blocking::Response)) -> String {
-    let status = response.status();
-    let status = format!(
-        "{} {}",
-        status.as_str(),
-        status.canonical_reason().unwrap_or("")
-    );
-
-    format!(
-        "{status} for {method} request\n{}",
-        response
-            .text()
-            .unwrap_or("Error getting response text".to_string())
-    )
 }
