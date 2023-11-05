@@ -176,11 +176,51 @@ fn on_request_submit(
 
     let fallible_response = make_request(client, method, url, request_body);
 
-    if let Some(log_file) = log_file {
-        output_to_file(s, &fallible_response, method, url, log_file);
-    }
+    // if let Some(log_file) = log_file {
+    //     output_to_file(s, fallible_response, method, url, log_file);
+    // }
 
-    output_to_screen(s, fallible_response, method);
+    // output_to_screen(s, fallible_response, method);
+
+    let datetime = chrono::Utc::now().to_rfc3339();
+
+    let output = match fallible_response {
+        Ok(success) => {
+            let status = success.status();
+            format!(
+                "{} - {} {} for {} to {}\n{}\n",
+                datetime,
+                status.as_str(),
+                status.canonical_reason().unwrap_or(""),
+                method.to_string(),
+                url,
+                success.text().unwrap_or("".to_string())
+            )
+        }
+        Err(err) => {
+            format!("{} - ERROR: {}\n", datetime, err)
+        }
+    };
+
+    s.call_on_name("response", |view: &mut TextView| {
+        view.set_content(&output);
+    });
+
+    if let Some(log_file) = log_file {
+        match append_to_file(log_file, &output) {
+            Err(err) => {
+                let dialog = Dialog::around(TextView::new(format!(
+                    "Error logging to file {}: {}",
+                    log_file, err
+                )))
+                .button("Cancel", |s| {
+                    s.pop_layer();
+                });
+                s.add_layer(dialog);
+            }
+            _ => (),
+        }
+    }
 }
 
 fn make_request(
@@ -198,74 +238,6 @@ fn make_request(
     }?;
 
     err_to_string!(builder.send())
-}
-
-fn output_to_screen(s: &mut Cursive, fallible_response: FallibleResponse, method: &Method) {
-    let (label_content, body_content) = match fallible_response {
-        Ok(success) => {
-            let status = success.status();
-            (
-                format!(
-                    "Response: {} {} for {}",
-                    status.as_str(),
-                    status.canonical_reason().unwrap_or(""),
-                    method.to_string()
-                ),
-                success.text().unwrap_or("".to_string()),
-            )
-        }
-        Err(err) => ("Response: ERROR".to_string(), err),
-    };
-
-    s.call_on_name("response_label", |view: &mut TextView| {
-        view.set_content(label_content);
-    });
-
-    s.call_on_name("response", |view: &mut TextView| {
-        view.set_content(body_content);
-    });
-}
-
-fn output_to_file(
-    s: &mut Cursive,
-    fallible_response: &FallibleResponse,
-    method: &Method,
-    url: &str,
-    log_file: &str,
-) {
-    let datetime = chrono::Utc::now().to_rfc3339();
-
-    let entry = match fallible_response {
-        Ok(success) => {
-            let status = success.status();
-            format!(
-                "{} {} for {} to {}",
-                status.as_str(),
-                status.canonical_reason().unwrap_or(""),
-                method.to_string(),
-                url
-            )
-        }
-        Err(err) => {
-            format!("ERROR: {}", err)
-        }
-    };
-
-    let entry = format!("{} - {}", datetime, entry);
-
-    match append_to_file(log_file, &entry) {
-        Err(err) => {
-            let dialog = Dialog::around(TextView::new(format!(
-                "Error logging to file {}: {}",
-                log_file, err
-            )))
-            .button("Cancel", |s| {
-                s.pop_layer();
-            });
-            s.add_layer(dialog);
-        }
-        _ => (),
-    }
 }
 
 /// Make requests based on the given JSON file
