@@ -166,12 +166,14 @@ fn on_request_submit(
 ) {
     let url = s
         .find_name::<ResizedView<EditView>>("url")
-        .unwrap()
+        .expect("url field should exist")
         .get_inner()
         .get_content();
     let url = url.as_str();
 
-    let request_body = s.find_name::<TextArea>("request").unwrap();
+    let request_body = s
+        .find_name::<TextArea>("request")
+        .expect("request field should exist");
     let request_body = request_body.get_content().to_owned();
 
     let fallible_response = make_request(client, method, url, request_body);
