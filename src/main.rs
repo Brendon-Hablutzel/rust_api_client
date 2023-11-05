@@ -11,7 +11,10 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Interactive api client
-    Interactive,
+    Interactive {
+        #[arg(short, long)]
+        log_file: Option<String>,
+    },
     /// Send API requests from JSON file
     FromFile {
         /// The JSON file with the requests to send
@@ -19,6 +22,9 @@ enum Commands {
         #[arg(short, long)]
         /// Whether the program should stop sending requests early if one errors
         stop_early_on_fail: bool,
+        #[arg(short, long)]
+        /// An optional file to log reuqest and response history to
+        log_file: Option<String>,
     },
 }
 
@@ -26,12 +32,13 @@ fn main() {
     let cli = Cli::parse();
 
     match &cli.command {
-        Commands::Interactive => interactive(),
+        Commands::Interactive { log_file } => interactive(log_file),
         Commands::FromFile {
             file,
             stop_early_on_fail,
+            log_file,
         } => {
-            match from_file(file, *stop_early_on_fail) {
+            match from_file(file, *stop_early_on_fail, log_file) {
                 Err(err) => println!("{err}"),
                 _ => (),
             };

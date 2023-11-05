@@ -3,7 +3,7 @@ use cursive::{
     theme::{BaseColor, Color, PaletteColor, PaletteStyle, Theme},
     traits::*,
     views::{
-        Button, EditView, LinearLayout, Panel, ResizedView, SelectView, TextArea, TextView,
+        Button, Dialog, EditView, LinearLayout, Panel, ResizedView, SelectView, TextArea, TextView,
         ThemedView,
     },
     Cursive,
@@ -15,7 +15,8 @@ use serde_json;
 use std::{env, fs, io::Write, panic};
 
 type RequestError = String;
-type FileError = String;
+
+type FallibleResponse = Result<reqwest::blocking::Response, String>;
 
 #[derive(Deserialize, Debug)]
 struct RequestFile {
@@ -63,15 +64,15 @@ macro_rules! err_to_string {
     };
 }
 
-// Helper function for writing a string to a file
-pub fn write_to_file(file_path: &str, data: &str) -> Result<(), String> {
-    let mut file = err_to_string!(fs::File::open(file_path))?;
+// Helper function for appending a string to a file
+pub fn append_to_file(file_path: &str, data: &str) -> Result<(), String> {
+    let mut file = err_to_string!(fs::OpenOptions::new().append(true).open(file_path))?;
     err_to_string!(file.write_all(data.as_bytes()))?;
     Ok(())
 }
 
 /// Launch the interactive API client
-pub fn interactive() {
+pub fn interactive(log_file: &Option<String>) {
     dotenv().ok();
 
     let panic_log_file = env::var("PANIC_LOG").expect("PANIC_LOG env var should be set");
@@ -84,6 +85,8 @@ pub fn interactive() {
         }
     }));
 
+    let log_file = log_file.to_owned();
+
     let client = reqwest::blocking::Client::new();
 
     let mut siv = cursive::default();
@@ -94,7 +97,7 @@ pub fn interactive() {
             .item("POST", Method::POST)
             .item("DELETE", Method::DELETE)
             .item("PATCH", Method::PATCH)
-            .on_submit(move |s, method| on_request_submit(s, method, &client))
+            .on_submit(move |s, method| on_request_submit(s, method, &client, &log_file))
             .h_align(cursive::align::HAlign::Center)
             .fixed_width(10)
             .with_name("method"),
@@ -155,7 +158,12 @@ pub fn interactive() {
     siv.run();
 }
 
-fn on_request_submit(s: &mut Cursive, method: &Method, client: &reqwest::blocking::Client) {
+fn on_request_submit(
+    s: &mut Cursive,
+    method: &Method,
+    client: &reqwest::blocking::Client,
+    log_file: &Option<String>,
+) {
     let url = s
         .find_name::<ResizedView<EditView>>("url")
         .unwrap()
@@ -166,30 +174,47 @@ fn on_request_submit(s: &mut Cursive, method: &Method, client: &reqwest::blockin
     let request_body = s.find_name::<TextArea>("request").unwrap();
     let request_body = request_body.get_content().to_owned();
 
-    let response = match *method {
+    let fallible_response = make_request(client, method, url, request_body);
+
+    if let Some(log_file) = log_file {
+        output_to_file(s, &fallible_response, method, url, log_file);
+    }
+
+    output_to_screen(s, fallible_response, method);
+}
+
+fn make_request(
+    client: &reqwest::blocking::Client,
+    method: &Method,
+    url: &str,
+    body: String,
+) -> FallibleResponse {
+    let builder = match *method {
         Method::GET => Ok(client.get(url)),
-        Method::POST => Ok(client.post(url).body(request_body)),
+        Method::POST => Ok(client.post(url).body(body)),
         Method::DELETE => Ok(client.delete(url)),
         Method::PATCH => Ok(client.patch(url)),
         _ => Err("Invalid method".to_string()),
-    }
-    .and_then(|builder| err_to_string!(builder.send()));
+    }?;
 
-    let (label_content, body_content) = match response {
+    err_to_string!(builder.send())
+}
+
+fn output_to_screen(s: &mut Cursive, fallible_response: FallibleResponse, method: &Method) {
+    let (label_content, body_content) = match fallible_response {
         Ok(success) => {
             let status = success.status();
-            let label = format!(
-                "Response: {} {} for {}",
-                status.as_str(),
-                status.canonical_reason().unwrap_or(""),
-                method.as_str()
-            );
-
-            let body = success.text().unwrap_or("".to_string());
-
-            (label, body)
+            (
+                format!(
+                    "Response: {} {} for {}",
+                    status.as_str(),
+                    status.canonical_reason().unwrap_or(""),
+                    method.to_string()
+                ),
+                success.text().unwrap_or("".to_string()),
+            )
         }
-        Err(err) => ("".to_string(), format!("ERROR: {err}")),
+        Err(err) => ("Response: ERROR".to_string(), err),
     };
 
     s.call_on_name("response_label", |view: &mut TextView| {
@@ -201,40 +226,84 @@ fn on_request_submit(s: &mut Cursive, method: &Method, client: &reqwest::blockin
     });
 }
 
-/// Make requests based on the given JSON file
-pub fn from_file(file_path: &str, stop_early_on_fail: bool) -> Result<(), String> {
-    let client = reqwest::blocking::Client::new();
+fn output_to_file(
+    s: &mut Cursive,
+    fallible_response: &FallibleResponse,
+    method: &Method,
+    url: &str,
+    log_file: &str,
+) {
+    let datetime = chrono::Utc::now().to_rfc3339();
 
-    let request_results = make_file_requests(client, file_path)?;
-
-    for result in request_results {
-        match result {
-            Ok(success) => println!("{success}"),
-            Err(err) => {
-                let err_string = format!("ERROR: {err}");
-                if stop_early_on_fail {
-                    return Err(err_string);
-                } else {
-                    println!("{err_string}");
-                }
-            }
+    let entry = match fallible_response {
+        Ok(success) => {
+            let status = success.status();
+            format!(
+                "{} {} for {} to {}",
+                status.as_str(),
+                status.canonical_reason().unwrap_or(""),
+                method.to_string(),
+                url
+            )
         }
-    }
+        Err(err) => {
+            format!("ERROR: {}", err)
+        }
+    };
 
-    Ok(())
+    let entry = format!("{} - {}", datetime, entry);
+
+    match append_to_file(log_file, &entry) {
+        Err(err) => {
+            let dialog = Dialog::around(TextView::new(format!(
+                "Error logging to file {}: {}",
+                log_file, err
+            )))
+            .button("Cancel", |s| {
+                s.pop_layer();
+            });
+            s.add_layer(dialog);
+        }
+        _ => (),
+    }
 }
 
-// an error here represents an error opening or parsing the JSON file
-fn make_file_requests(
-    client: reqwest::blocking::Client,
+/// Make requests based on the given JSON file
+pub fn from_file(
     file_path: &str,
-) -> Result<impl Iterator<Item = Result<String, RequestError>>, FileError> {
+    stop_early_on_fail: bool,
+    log_file: &Option<String>,
+) -> Result<(), String> {
+    let client = reqwest::blocking::Client::new();
+
     let content = err_to_string!(fs::read_to_string(file_path))?;
     let content = err_to_string!(serde_json::from_str::<RequestFile>(&content))?;
 
-    Ok(content.requests.into_iter().map(move |request| {
+    let request_results = content.requests.into_iter().map(|request| {
         Request::try_from(request).and_then(|request| process_request(&client, request))
-    }))
+    });
+
+    for result in request_results {
+        let output = match result {
+            Ok(success) => format!("{success}\n"),
+            Err(err) => {
+                let err_string = format!("ERROR: {err}\n");
+                if stop_early_on_fail {
+                    return Err(err_string);
+                } else {
+                    format!("{}", err_string)
+                }
+            }
+        };
+
+        if let Some(log_file) = log_file {
+            append_to_file(log_file, &format!("{}\n", &output))?
+        }
+
+        println!("{output}");
+    }
+
+    Ok(())
 }
 
 // an error here represents an error while sending the request,
@@ -255,6 +324,8 @@ fn process_request(
         _ => return Err("Invalid method".to_string()),
     };
 
+    let datetime = chrono::Utc::now().to_rfc3339();
+
     let response = err_to_string!(builder.send())?;
 
     let status = response.status();
@@ -262,7 +333,8 @@ fn process_request(
     let response_body = response.text().unwrap_or(String::from("<no body>"));
 
     Ok(format!(
-        "{} {} for {} to {}\n{}\n",
+        "{} - {} {} for {} to {}\n{}",
+        datetime,
         status.as_str(),
         status.canonical_reason().unwrap_or(""),
         method.to_string(),
