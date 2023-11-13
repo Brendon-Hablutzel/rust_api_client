@@ -23,7 +23,7 @@ enum Commands {
         /// Whether the program should stop sending requests early if one errors
         stop_early_on_fail: bool,
         #[arg(short, long)]
-        /// An optional file to log reuqest and response history to
+        /// An optional file to log request and response history to
         log_file: Option<String>,
     },
 }
